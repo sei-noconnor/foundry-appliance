@@ -1,11 +1,42 @@
 #!/bin/bash 
 
 # Usage: export GOVC_URL=<server> GOVC_PASSWORD=<password> && ./import-appliance.sh [GOVC_USERNAME] [DATASTORE] [VM_NAME] [RESOURCE_POOL]
-# Or via curl: export GOVC_URL=<server> GOVC_PASSWORD=<password> && curl -sSL https://raw.githubusercontent.com/your-repo/foundry-appliance/main/import-appliance.sh | bash -s -- [GOVC_USERNAME] [DATASTORE] [VM_NAME] [RESOURCE_POOL]
-# Required environment variables: GOVC_URL, GOVC_PASSWORD
-# Optional environment variables: GOVC_USERNAME (defaults to 'root'), GOVC_DATASTORE, GOVC_VM_NAME, GOVC_RESOURCE_POOL
+# Or via curl: curl -sSL https://raw.githubusercontent.com/your-repo/foundry-appliance/main/import-appliance.sh | bash -s -- <GOVC_URL> <GOVC_PASSWORD> [GOVC_USERNAME] [DATASTORE] [VM_NAME] [RESOURCE_POOL]
+# When using curl, the first two arguments must be GOVC_URL and GOVC_PASSWORD
+# For local execution, use environment variables: GOVC_URL, GOVC_PASSWORD
 
 set -e  # Exit on any error
+
+# Check if credentials are provided as arguments (for curl usage) or environment variables
+if [[ $# -ge 2 ]]; then
+    # Arguments provided - assume curl usage format
+    GOVC_URL="$1"
+    GOVC_PASSWORD="$2"
+    shift 2  # Remove first two arguments
+else
+    # No arguments - check environment variables
+    if [[ -z "$GOVC_URL" || -z "$GOVC_PASSWORD" ]]; then
+        echo "Error: Missing required credentials"
+        echo ""
+        echo "For curl usage:"
+        echo "  curl -sSL <script-url> | bash -s -- <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]"
+        echo ""
+        echo "Example:"
+        echo "  curl -sSL https://raw.githubusercontent.com/sei-noconnor/foundry-appliance/main/import-appliance.sh | bash -s -- esx-01.example.com 'password123'"
+        echo ""
+        echo "For local execution:"
+        echo "  export GOVC_URL=<ESXi-server-or-vcenter>"
+        echo "  export GOVC_PASSWORD='<password>'"
+        echo "  ./import-appliance.sh [username] [datastore] [vm_name] [resource_pool]"
+        echo ""
+        echo "Optional parameters:"
+        echo "  GOVC_USERNAME (default: 'root')"
+        echo "  GOVC_DATASTORE (default: 'ds_nfs')"
+        echo "  GOVC_VM_NAME (default: 'foundry-appliance')"
+        echo "  GOVC_RESOURCE_POOL (default: 'Resources')"
+        exit 1
+    fi
+fi
 
 # Create temporary working directory
 TEMP_DIR=$(mktemp -d)
@@ -206,33 +237,8 @@ echo "Created foundry-modified.ova"
 popd
 
 # 3) Import the edited OVF with govc
-# Validate required environment variables first
-if [[ -z "$GOVC_URL" || -z "$GOVC_PASSWORD" ]]; then
-    echo "Error: Missing required environment variables"
-    echo ""
-    echo "Required environment variables:"
-    echo "  export GOVC_URL=<ESXi-server-or-vcenter>"
-    echo "  export GOVC_PASSWORD='<password>'"
-    echo ""
-    echo "Usage examples:"
-    echo "  export GOVC_URL=esx-01.example.com"
-    echo "  export GOVC_PASSWORD='password123'"
-    echo "  curl -sSL <script-url> | bash"
-    echo ""
-    echo "  # Or run locally:"
-    echo "  export GOVC_URL=esx-01.example.com"
-    echo "  export GOVC_PASSWORD='password123'"
-    echo "  ./import-appliance.sh [username] [datastore] [vm_name] [resource_pool]"
-    echo ""
-    echo "Optional parameters (or environment variables):"
-    echo "  GOVC_USERNAME (default: 'root')"
-    echo "  GOVC_DATASTORE (default: 'ds_nfs')"
-    echo "  GOVC_VM_NAME (default: 'foundry-appliance')"
-    echo "  GOVC_RESOURCE_POOL (default: 'Resources')"
-    exit 1
-fi
-
-# Parse command line arguments or use environment variables (with defaults)
+# Parse remaining command line arguments or use environment variables (with defaults)
+# Note: $1, $2, etc. now refer to remaining args after URL/password were shifted off
 GOVC_USERNAME=${1:-${GOVC_USERNAME:-'root'}}
 GOVC_DATASTORE=${2:-${GOVC_DATASTORE:-'ds_nfs'}}
 GOVC_VM_NAME=${3:-${GOVC_VM_NAME:-'foundry-appliance'}}
