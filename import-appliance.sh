@@ -1,11 +1,178 @@
-#!/bin/bash 
+#!/bin/bash
 
-# Usage: ./import-appliance.sh [GOVC_URL] [GOVC_USERNAME] [GOVC_PASSWORD] [DATASTORE] [VM_NAME] [RESOURCE_POOL]
-# Environment variables can also be used: GOVC_URL, GOVC_USERNAME, GOVC_PASSWORD, GOVC_DATASTORE, GOVC_VM_NAME, GOVC_RESOURCE_POOL
+# Foundry Appliance Import Script
+# Works on: macOS and Linux hosts
+# Note: ESXi hosts are not supported due to wget lacking HTTPS support
+#
+# Usage options:
+# 1) Local with env vars: export GOVC_URL=<server> GOVC_PASSWORD=<password> && ./import-appliance.sh [username] [datastore] [vm_name] [resource_pool]
+# 2) Local with args: ./import-appliance.sh <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]
+# 3) Via curl: curl -sSL <script-url> | bash -s -- <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]
 
-# Function to check if command exists
+set -e  # Exit on any error
+
+# Detect environment
+detect_environment() {
+    # Check if we're on ESXi (not supported)
+    if [ -f /etc/vmware-release ] && grep -q "ESXi" /etc/vmware-release 2>/dev/null; then
+        echo "esxi"
+    elif [ -f /etc/vmware-release ]; then
+        echo "vmware"  
+    elif command -v uname >/dev/null 2>&1; then
+        case "$(uname -s)" in
+            Darwin) echo "macos" ;;
+            Linux) echo "linux" ;;
+            *) echo "unknown" ;;
+        esac
+    else
+        echo "unknown"
+    fi
+}
+
+PLATFORM=$(detect_environment)
+echo "Detected platform: $PLATFORM"
+
+# Check for ESXi and exit with error
+if [ "$PLATFORM" = "esxi" ]; then
+    echo "Error: ESXi hosts are not supported"
+    echo "ESXi's built-in wget does not support HTTPS, which is required for downloading"
+    echo "Please run this script from a Linux or macOS host with network access to your ESXi server"
+    exit 1
+fi
+
+# Platform-specific setup
+# (ESXi support removed - use from remote Linux/macOS host instead)
+
+# Function to get latest release URL from GitHub API
+get_latest_release_url() {
+    local tool=$(detect_download_tool)
+    local api_url="https://api.github.com/repos/cmu-sei/foundry-appliance/releases/latest"
+    local temp_response="${TEMP_DIR}/github_response.json"
+    local fallback_url="https://incuspub.blob.core.usgovcloudapi.net/ova/appliance/foundry-appliance-v0.10.2.ova"
+    
+    case "$tool" in
+        curl)
+            if curl -s "$api_url" > "$temp_response" 2>/dev/null && [ -s "$temp_response" ]; then
+                # File exists and is not empty
+                :
+            else
+                echo "$fallback_url"
+                return
+            fi
+            ;;
+        wget)
+            if wget -q -O "$temp_response" "$api_url" 2>/dev/null && [ -s "$temp_response" ]; then
+                # File exists and is not empty
+                :
+            else
+                echo "$fallback_url"
+                return
+            fi
+            ;;
+        *)
+            echo "$fallback_url"
+            return
+            ;;
+    esac
+    
+    # Extract OVA URL from JSON response
+    if [ -f "$temp_response" ] && grep -q "browser_download_url" "$temp_response" 2>/dev/null; then
+        # Try to extract the .ova URL
+        if command_exists grep && command_exists sed; then
+            ova_url=$(grep "browser_download_url.*\.ova" "$temp_response" 2>/dev/null | head -1 | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/' 2>/dev/null)
+            if [ -n "$ova_url" ] && [ "$ova_url" != "$temp_response" ]; then
+                rm -f "$temp_response" 2>/dev/null
+                echo "$ova_url"
+                return
+            fi
+        fi
+    fi
+    
+    # Fallback to hardcoded URL if API parsing fails
+    rm -f "$temp_response" 2>/dev/null
+    echo "$fallback_url"
+}
+
+# Check if credentials are provided as arguments (for curl usage) or environment variables
+if [[ $# -ge 2 ]]; then
+    # Arguments provided - assume curl usage format
+    GOVC_URL="$1"
+    GOVC_PASSWORD="$2"
+    shift 2  # Remove first two arguments
+else
+    # No arguments - check environment variables
+    if [[ -z "$GOVC_URL" || -z "$GOVC_PASSWORD" ]]; then
+        echo "Error: Missing required credentials"
+        echo ""
+        echo "For curl usage:"
+        echo "  curl -sSL <script-url> | bash -s -- <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool] [ova_url]"
+        echo ""
+        echo "Example:"
+        echo "  curl -sSL https://raw.githubusercontent.com/sei-noconnor/foundry-appliance/main/import-appliance.sh | bash -s -- esx-01.example.com 'password123'"
+        echo ""
+        echo "For local execution:"
+        echo "  export GOVC_URL=<ESXi-server-or-vcenter>"
+        echo "  export GOVC_PASSWORD='<password>'"
+        echo "  ./import-appliance.sh [username] [datastore] [vm_name] [resource_pool] [ova_url]"
+        echo ""
+        echo "Optional parameters:"
+        echo "  GOVC_USERNAME (default: 'root')"
+        echo "  GOVC_DATASTORE (default: 'datastore1')"
+        echo "  GOVC_VM_NAME (default: 'foundry-appliance')"
+        echo "  GOVC_RESOURCE_POOL (default: 'Resources')"
+        echo "  OVA_URL (default: latest from GitHub releases)"
+        exit 1
+    fi
+fi
+
+# Create temporary working directory
+TEMP_DIR=$(mktemp -d)
+
+echo "Working in temporary directory: $TEMP_DIR"
+
+# Cleanup function
+cleanup() {
+    echo "Cleaning up temporary files..."
+    rm -rf "$TEMP_DIR"
+}
+
+# Set trap to cleanup on exit
+trap cleanup EXIT
+
+# Function to check if command exists (cross-platform)
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# Detect download tool
+detect_download_tool() {
+    if command_exists curl; then
+        echo "curl"
+    elif command_exists wget; then
+        echo "wget"
+    else
+        echo "none"
+    fi
+}
+
+# Universal download function
+download_file() {
+    local url="$1"
+    local output="$2"
+    local tool=$(detect_download_tool)
+    
+    case "$tool" in
+        curl)
+            curl -L -o "$output" "$url"
+            ;;
+        wget)
+            wget -O "$output" "$url"
+            ;;
+        none)
+            echo "Error: Neither curl nor wget found for downloading files"
+            exit 1
+            ;;
+    esac
 }
 
 # Function to detect OS
@@ -53,18 +220,18 @@ install_govc() {
     local os=$(detect_os)
     echo "Installing govc..."
     
-    if [[ "$os" == "macos" ]]; then
-        curl -L -o govc_darwin_amd64.gz \
-            https://github.com/vmware/govmomi/releases/latest/download/govc_darwin_amd64.gz
+    if [ "$os" = "macos" ]; then
+        download_file "https://github.com/vmware/govmomi/releases/latest/download/govc_darwin_amd64.gz" "govc_darwin_amd64.gz"
         gunzip govc_darwin_amd64.gz
         chmod +x govc_darwin_amd64
         sudo mv govc_darwin_amd64 /usr/local/bin/govc
-    elif [[ "$os" == "linux" ]]; then
-        curl -L -o govc_linux_amd64.gz \
-            https://github.com/vmware/govmomi/releases/latest/download/govc_linux_amd64.gz
+        GOVC_PATH="govc"
+    elif [ "$os" = "linux" ]; then
+        download_file "https://github.com/vmware/govmomi/releases/latest/download/govc_linux_amd64.gz" "govc_linux_amd64.gz"
         gunzip govc_linux_amd64.gz
         chmod +x govc_linux_amd64
         sudo mv govc_linux_amd64 /usr/local/bin/govc
+        GOVC_PATH="govc"
     else
         echo "Unsupported OS for govc installation"
         exit 1
@@ -74,6 +241,10 @@ install_govc() {
 # Check and install required applications
 echo "Checking for required applications..."
 
+# Initialize GOVC_PATH
+GOVC_PATH="govc"
+
+# Check for xmllint
 if ! command_exists xmllint; then
     echo "xmllint not found, installing..."
     install_xmllint
@@ -81,44 +252,100 @@ else
     echo "xmllint found"
 fi
 
+# Check for govc on all platforms
 if ! command_exists govc; then
     echo "govc not found, installing..."
     install_govc
 else
-    echo "govc found"
+    echo "govc found in PATH"
+    GOVC_PATH="govc"
 fi
 
 echo "All required applications are available"
 echo ""
 
 # 1) Download and extract the OVA
-if [ ! -f "foundry.ova" ]; then
-    echo "Downloading foundry.ova..."
-    curl -L -o foundry.ova \
-      https://incuspub.blob.core.usgovcloudapi.net/ova/appliance/foundry-appliance-v0.10.2.ova
+cd "$TEMP_DIR"
+
+# Set OVA_URL now that temp directory is available
+# Parse remaining command line arguments or use environment variables (with defaults)
+# Note: $1, $2, etc. now refer to remaining args after URL/password were shifted off
+GOVC_USERNAME=${1:-${GOVC_USERNAME:-'root'}}
+GOVC_DATASTORE=${2:-${GOVC_DATASTORE:-'datastore1'}}
+GOVC_VM_NAME=${3:-${GOVC_VM_NAME:-'foundry-appliance'}}
+GOVC_RESOURCE_POOL=${4:-${GOVC_RESOURCE_POOL:-'Resources'}}
+
+# Set OVA_URL after temp directory is available
+if [ -n "$5" ]; then
+    OVA_URL="$5"
+elif [ -n "$OVA_URL" ]; then
+    # Use existing environment variable
+    :
 else
-    echo "foundry.ova already exists, skipping download"
+    # Get latest release URL
+    OVA_URL=$(get_latest_release_url)
 fi
 
-if [ ! -d "foundry-ova" ]; then
-    echo "Extracting OVA..."
-    mkdir foundry-ova
-    # OVA files are TAR archives, but may need special handling
-    if tar -tf foundry.ova >/dev/null 2>&1; then
-        tar -C foundry-ova -xf foundry.ova
-    else
-        echo "Error: foundry.ova appears to be corrupted or not a valid OVA file"
-        echo "Please re-download the OVA file"
-        exit 1
-    fi
+echo "Downloading foundry.ova from: $OVA_URL"
+echo "This may take several minutes depending on your connection..."
+download_file "$OVA_URL" "foundry.ova"
+
+if [ ! -f foundry.ova ]; then
+    echo "Error: Failed to download foundry.ova"
+    exit 1
+fi
+
+echo "Download completed. File size: $(ls -lh foundry.ova | awk '{print $5}')"
+
+echo "Extracting OVA..."
+mkdir foundry-ova
+# OVA files are TAR archives, but may need special handling
+if tar -tf foundry.ova >/dev/null 2>&1; then
+    tar -C foundry-ova -xf foundry.ova
 else
-    echo "foundry-ova directory already exists, skipping extraction"
+    echo "Error: foundry.ova appears to be corrupted or not a valid OVA file"
+    echo "Please re-download the OVA file"
+    exit 1
 fi
 
 # 2) Remove any <Item> with <rasd:ResourceType>35</rasd:ResourceType> (sound card)
-pushd foundry-ova
-# Use Python for XML editing since xmllint alone doesn't support deletion
-python3 -c "
+cd foundry-ova
+
+# Find the OVF file
+OVF_FILE=""
+for file in *.ovf; do
+    if [ -f "$file" ]; then
+        OVF_FILE="$file"
+        break
+    fi
+done
+
+if [ -z "$OVF_FILE" ]; then
+    echo "Error: No OVF file found in the extracted OVA"
+    exit 1
+fi
+
+echo "Processing $OVF_FILE to remove sound card..."
+
+if ! command_exists python3; then
+    # Use sed-based approach for systems without Python
+    echo "Using simplified sound card removal (sed-based)..."
+    
+    # Create a backup
+    cp "$OVF_FILE" "${OVF_FILE}.backup"
+    
+    # Use sed to remove sound card entries (ResourceType 35)
+    # This removes entire Item blocks containing ResourceType 35
+    sed -i.tmp '/ResourceType>35<\/rasd:ResourceType>/,/<\/Item>/d' "$OVF_FILE" 2>/dev/null || {
+        echo "Warning: Could not remove sound card automatically. Proceeding with original OVF."
+        cp "${OVF_FILE}.backup" "$OVF_FILE"
+    }
+    rm -f "${OVF_FILE}.tmp" 2>/dev/null
+    echo "Sound card removal completed (simplified method)"
+else
+    # Use Python for more precise XML editing on systems that have it
+    echo "Using Python for precise sound card removal..."
+    python3 -c "
 import xml.etree.ElementTree as ET
 import glob
 import sys
@@ -128,13 +355,6 @@ for ovf_file in glob.glob('*.ovf'):
         # Parse the XML file
         tree = ET.parse(ovf_file)
         root = tree.getroot()
-        
-        # Define namespaces
-        namespaces = {
-            'ovf': 'http://schemas.dmtf.org/ovf/envelope/1',
-            'rasd': 'http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData',
-            'vssd': 'http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_VirtualSystemSettingData'
-        }
         
         # Find all Item elements that contain ResourceType 35
         items_removed = 0
@@ -167,57 +387,42 @@ for ovf_file in glob.glob('*.ovf'):
         print(f'Error processing {ovf_file}: {e}', file=sys.stderr)
         sys.exit(1)
 "
+fi
 
 # Update the manifest file with new checksums
-echo "Updating manifest file..."
-for ovf_file in *.ovf; do
-    if [ -f "$ovf_file" ]; then
-        ovf_hash=$(openssl sha256 "$ovf_file" | cut -d' ' -f2)
-        ovf_size=$(stat -f%z "$ovf_file" 2>/dev/null || stat -c%s "$ovf_file" 2>/dev/null)
-        
-        # Update .mf file
-        mf_file="${ovf_file%.ovf}.mf"
+if [ -f "$OVF_FILE" ]; then
+    echo "Updating manifest file..."
+    
+    # Calculate hash (try different methods)
+    if command_exists sha256sum; then
+        ovf_hash=$(sha256sum "$OVF_FILE" | cut -d' ' -f1)
+    elif command_exists openssl; then
+        ovf_hash=$(openssl sha256 "$OVF_FILE" | cut -d' ' -f2)
+    else
+        echo "Warning: No SHA256 tool found, skipping manifest update"
+        ovf_hash=""
+    fi
+    
+    if [ -n "$ovf_hash" ]; then
+        mf_file="${OVF_FILE%.ovf}.mf"
         if [ -f "$mf_file" ]; then
-            # Replace the OVF hash in the manifest
-            sed -i.bak "s/SHA256(${ovf_file})=.*/SHA256(${ovf_file})= ${ovf_hash}/" "$mf_file" || \
-            echo "SHA256(${ovf_file})= ${ovf_hash}" >> "$mf_file"
-            rm -f "$mf_file.bak"
-            echo "Updated manifest for $ovf_file"
+            # Create backup and update manifest
+            cp "$mf_file" "${mf_file}.backup"
+            sed -i.tmp "s/SHA256(${OVF_FILE})=.*/SHA256(${OVF_FILE})= ${ovf_hash}/" "$mf_file" 2>/dev/null || {
+                echo "SHA256(${OVF_FILE})= ${ovf_hash}" > "$mf_file"
+            }
+            rm -f "${mf_file}.tmp" 2>/dev/null
+            echo "Updated manifest for $OVF_FILE"
         fi
     fi
-done
+fi
 
-# Repackage the modified OVA
-echo "Repackaging OVA..."
-rm -f ../foundry-modified.ova
-tar -cf ../foundry-modified.ova *.ovf *.vmdk *.mf
-echo "Created foundry-modified.ova"
-popd
+cd "$TEMP_DIR"
+
+echo ""
+echo "OVA processing completed successfully"
 
 # 3) Import the edited OVF with govc
-# Parse command line arguments or use environment variables
-GOVC_URL=${1:-${GOVC_URL}}
-GOVC_USERNAME=${2:-${GOVC_USERNAME}}
-GOVC_PASSWORD=${3:-${GOVC_PASSWORD}}
-GOVC_DATASTORE=${4:-${GOVC_DATASTORE:-'ds_nfs'}}
-GOVC_VM_NAME=${5:-${GOVC_VM_NAME:-'foundry-appliance'}}
-GOVC_RESOURCE_POOL=${6:-${GOVC_RESOURCE_POOL:-'Resources'}}
-
-# Validate required parameters
-if [[ -z "$GOVC_URL" || -z "$GOVC_USERNAME" || -z "$GOVC_PASSWORD" ]]; then
-    echo "Error: Missing required parameters"
-    echo "Usage: $0 <GOVC_URL> <GOVC_USERNAME> <GOVC_PASSWORD> [DATASTORE] [VM_NAME] [RESOURCE_POOL]"
-    echo "Example: $0 esx-01.example.com root 'password123' ds_nfs foundry-appliance Resources"
-    echo ""
-    echo "Or set environment variables:"
-    echo "  export GOVC_URL=esx-01.example.com"
-    echo "  export GOVC_USERNAME=root"
-    echo "  export GOVC_PASSWORD='password123'"
-    echo "  export GOVC_DATASTORE=ds_nfs              # optional, defaults to 'ds_nfs'"
-    echo "  export GOVC_VM_NAME=foundry-appliance     # optional, defaults to 'foundry-appliance'"
-    echo "  export GOVC_RESOURCE_POOL=Resources       # optional, defaults to 'Resources'"
-    exit 1
-fi
 
 # Export for govc
 export GOVC_URL
@@ -225,14 +430,25 @@ export GOVC_USERNAME
 export GOVC_PASSWORD
 export GOVC_INSECURE=1
 
+echo ""
+echo "Starting VM import..."
 echo "Connecting to vSphere at $GOVC_URL as $GOVC_USERNAME..."
 
-govc import.ovf \
+echo "Importing OVF..."
+"$GOVC_PATH" import.ovf \
   -ds="$GOVC_DATASTORE" \
   -name="$GOVC_VM_NAME" \
   -pool="$GOVC_RESOURCE_POOL" \
-  foundry-ova/foundry-appliance-v0.10.2.ovf
+  "foundry-ova/$OVF_FILE"
 
 # 4) Power on and verify
-govc vm.power -on "$GOVC_VM_NAME"
-govc vm.info "$GOVC_VM_NAME"
+echo "Powering on VM..."
+"$GOVC_PATH" vm.power -on "$GOVC_VM_NAME"
+
+echo ""
+echo "VM Information:"
+"$GOVC_PATH" vm.info "$GOVC_VM_NAME"
+
+echo ""
+echo "Import completed successfully!"
+echo "VM '$GOVC_VM_NAME' has been imported and powered on."
