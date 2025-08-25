@@ -1,7 +1,24 @@
 #!/bin/bash 
 
-# Usage: ./import-appliance.sh [GOVC_URL] [GOVC_USERNAME] [GOVC_PASSWORD] [DATASTORE] [VM_NAME] [RESOURCE_POOL]
-# Environment variables can also be used: GOVC_URL, GOVC_USERNAME, GOVC_PASSWORD, GOVC_DATASTORE, GOVC_VM_NAME, GOVC_RESOURCE_POOL
+# Usage: export GOVC_URL=<server> GOVC_PASSWORD=<password> && ./import-appliance.sh [GOVC_USERNAME] [DATASTORE] [VM_NAME] [RESOURCE_POOL]
+# Or via curl: export GOVC_URL=<server> GOVC_PASSWORD=<password> && curl -sSL https://raw.githubusercontent.com/your-repo/foundry-appliance/main/import-appliance.sh | bash -s -- [GOVC_USERNAME] [DATASTORE] [VM_NAME] [RESOURCE_POOL]
+# Required environment variables: GOVC_URL, GOVC_PASSWORD
+# Optional environment variables: GOVC_USERNAME (defaults to 'root'), GOVC_DATASTORE, GOVC_VM_NAME, GOVC_RESOURCE_POOL
+
+set -e  # Exit on any error
+
+# Create temporary working directory
+TEMP_DIR=$(mktemp -d)
+echo "Working in temporary directory: $TEMP_DIR"
+
+# Cleanup function
+cleanup() {
+    echo "Cleaning up temporary files..."
+    rm -rf "$TEMP_DIR"
+}
+
+# Set trap to cleanup on exit
+trap cleanup EXIT
 
 # Function to check if command exists
 command_exists() {
@@ -92,27 +109,21 @@ echo "All required applications are available"
 echo ""
 
 # 1) Download and extract the OVA
-if [ ! -f "foundry.ova" ]; then
-    echo "Downloading foundry.ova..."
-    curl -L -o foundry.ova \
-      https://incuspub.blob.core.usgovcloudapi.net/ova/appliance/foundry-appliance-v0.10.2.ova
-else
-    echo "foundry.ova already exists, skipping download"
-fi
+cd "$TEMP_DIR"
 
-if [ ! -d "foundry-ova" ]; then
-    echo "Extracting OVA..."
-    mkdir foundry-ova
-    # OVA files are TAR archives, but may need special handling
-    if tar -tf foundry.ova >/dev/null 2>&1; then
-        tar -C foundry-ova -xf foundry.ova
-    else
-        echo "Error: foundry.ova appears to be corrupted or not a valid OVA file"
-        echo "Please re-download the OVA file"
-        exit 1
-    fi
+echo "Downloading foundry.ova..."
+curl -L -o foundry.ova \
+  https://incuspub.blob.core.usgovcloudapi.net/ova/appliance/foundry-appliance-v0.10.2.ova
+
+echo "Extracting OVA..."
+mkdir foundry-ova
+# OVA files are TAR archives, but may need special handling
+if tar -tf foundry.ova >/dev/null 2>&1; then
+    tar -C foundry-ova -xf foundry.ova
 else
-    echo "foundry-ova directory already exists, skipping extraction"
+    echo "Error: foundry.ova appears to be corrupted or not a valid OVA file"
+    echo "Please re-download the OVA file"
+    exit 1
 fi
 
 # 2) Remove any <Item> with <rasd:ResourceType>35</rasd:ResourceType> (sound card)
@@ -195,29 +206,37 @@ echo "Created foundry-modified.ova"
 popd
 
 # 3) Import the edited OVF with govc
-# Parse command line arguments or use environment variables
-GOVC_URL=${1:-${GOVC_URL}}
-GOVC_USERNAME=${2:-${GOVC_USERNAME}}
-GOVC_PASSWORD=${3:-${GOVC_PASSWORD}}
-GOVC_DATASTORE=${4:-${GOVC_DATASTORE:-'ds_nfs'}}
-GOVC_VM_NAME=${5:-${GOVC_VM_NAME:-'foundry-appliance'}}
-GOVC_RESOURCE_POOL=${6:-${GOVC_RESOURCE_POOL:-'Resources'}}
-
-# Validate required parameters
-if [[ -z "$GOVC_URL" || -z "$GOVC_USERNAME" || -z "$GOVC_PASSWORD" ]]; then
-    echo "Error: Missing required parameters"
-    echo "Usage: $0 <GOVC_URL> <GOVC_USERNAME> <GOVC_PASSWORD> [DATASTORE] [VM_NAME] [RESOURCE_POOL]"
-    echo "Example: $0 esx-01.example.com root 'password123' ds_nfs foundry-appliance Resources"
+# Validate required environment variables first
+if [[ -z "$GOVC_URL" || -z "$GOVC_PASSWORD" ]]; then
+    echo "Error: Missing required environment variables"
     echo ""
-    echo "Or set environment variables:"
+    echo "Required environment variables:"
+    echo "  export GOVC_URL=<ESXi-server-or-vcenter>"
+    echo "  export GOVC_PASSWORD='<password>'"
+    echo ""
+    echo "Usage examples:"
     echo "  export GOVC_URL=esx-01.example.com"
-    echo "  export GOVC_USERNAME=root"
     echo "  export GOVC_PASSWORD='password123'"
-    echo "  export GOVC_DATASTORE=ds_nfs              # optional, defaults to 'ds_nfs'"
-    echo "  export GOVC_VM_NAME=foundry-appliance     # optional, defaults to 'foundry-appliance'"
-    echo "  export GOVC_RESOURCE_POOL=Resources       # optional, defaults to 'Resources'"
+    echo "  curl -sSL <script-url> | bash"
+    echo ""
+    echo "  # Or run locally:"
+    echo "  export GOVC_URL=esx-01.example.com"
+    echo "  export GOVC_PASSWORD='password123'"
+    echo "  ./import-appliance.sh [username] [datastore] [vm_name] [resource_pool]"
+    echo ""
+    echo "Optional parameters (or environment variables):"
+    echo "  GOVC_USERNAME (default: 'root')"
+    echo "  GOVC_DATASTORE (default: 'ds_nfs')"
+    echo "  GOVC_VM_NAME (default: 'foundry-appliance')"
+    echo "  GOVC_RESOURCE_POOL (default: 'Resources')"
     exit 1
 fi
+
+# Parse command line arguments or use environment variables (with defaults)
+GOVC_USERNAME=${1:-${GOVC_USERNAME:-'root'}}
+GOVC_DATASTORE=${2:-${GOVC_DATASTORE:-'ds_nfs'}}
+GOVC_VM_NAME=${3:-${GOVC_VM_NAME:-'foundry-appliance'}}
+GOVC_RESOURCE_POOL=${4:-${GOVC_RESOURCE_POOL:-'Resources'}}
 
 # Export for govc
 export GOVC_URL
