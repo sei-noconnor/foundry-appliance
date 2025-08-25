@@ -6,8 +6,8 @@
 # Usage options:
 # 1) Local with env vars: export GOVC_URL=<server> GOVC_PASSWORD=<password> && ./import-appliance.sh [username] [datastore] [vm_name] [resource_pool]
 # 2) Local with args: ./import-appliance.sh <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]
-# 3) Via curl: curl -sSL <script-url> | bash -s -- <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]
-# 4) On ESXi: Same as options 2 or 3, automatically detects ESXi environment
+# 3) Via curl (non-ESXi): curl -sSL <script-url> | bash -s -- <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]
+# 4) On ESXi via wget: wget -qO- <script-url> | sh -s -- <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]
 
 set -e  # Exit on any error
 
