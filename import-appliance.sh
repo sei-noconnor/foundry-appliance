@@ -125,15 +125,18 @@ else
     fi
 fi
 
-# Create temporary working directory
-TEMP_DIR=$(mktemp -d)
+# Create or reuse working directory
+TEMP_DIR="/tmp/foundry-appliance-import"
+mkdir -p "$TEMP_DIR"
 
 echo "Working in temporary directory: $TEMP_DIR"
 
 # Cleanup function
 cleanup() {
     echo "Cleaning up temporary files..."
-    rm -rf "$TEMP_DIR"
+    # Only clean extracted files, keep downloaded OVA for reuse
+    rm -rf "$TEMP_DIR"/foundry-ova 2>/dev/null || true
+    rm -f "$TEMP_DIR"/github_response.json 2>/dev/null || true
 }
 
 # Set trap to cleanup on exit
@@ -221,17 +224,49 @@ install_govc() {
     echo "Installing govc..."
     
     if [ "$os" = "macos" ]; then
-        download_file "https://github.com/vmware/govmomi/releases/latest/download/govc_darwin_amd64.gz" "govc_darwin_amd64.gz"
-        gunzip govc_darwin_amd64.gz
-        chmod +x govc_darwin_amd64
-        sudo mv govc_darwin_amd64 /usr/local/bin/govc
+        # Check for Homebrew first
+        if command_exists brew; then
+            echo "Using Homebrew to install govc..."
+            brew install govc
+            GOVC_PATH="govc"
+            return
+        fi
+        
+        # Manual installation for macOS
+        echo "Homebrew not found, installing from GitHub releases..."
+        local arch=$(uname -m)
+        case "$arch" in
+            x86_64) arch="amd64" ;;
+            arm64) arch="arm64" ;;
+            *) 
+                echo "Unsupported macOS architecture: $arch"
+                exit 1
+                ;;
+        esac
+        
+        download_file "https://github.com/vmware/govmomi/releases/latest/download/govc_Darwin_${arch}.tar.gz" "govc_Darwin_${arch}.tar.gz"
+        tar -xzf "govc_Darwin_${arch}.tar.gz"
+        chmod +x govc
+        sudo mv govc /usr/local/bin/govc
         GOVC_PATH="govc"
+        
     elif [ "$os" = "linux" ]; then
-        download_file "https://github.com/vmware/govmomi/releases/latest/download/govc_linux_amd64.gz" "govc_linux_amd64.gz"
-        gunzip govc_linux_amd64.gz
-        chmod +x govc_linux_amd64
-        sudo mv govc_linux_amd64 /usr/local/bin/govc
+        local arch=$(uname -m)
+        case "$arch" in
+            x86_64) arch="amd64" ;;
+            aarch64|arm64) arch="arm64" ;;
+            *) 
+                echo "Unsupported Linux architecture: $arch"
+                exit 1
+                ;;
+        esac
+        
+        download_file "https://github.com/vmware/govmomi/releases/latest/download/govc_Linux_${arch}.tar.gz" "govc_Linux_${arch}.tar.gz"
+        tar -xzf "govc_Linux_${arch}.tar.gz"
+        chmod +x govc
+        sudo mv govc /usr/local/bin/govc
         GOVC_PATH="govc"
+        
     else
         echo "Unsupported OS for govc installation"
         exit 1
@@ -267,15 +302,36 @@ echo ""
 # 1) Download and extract the OVA
 cd "$TEMP_DIR"
 
-# Set OVA_URL now that temp directory is available
 # Parse remaining command line arguments or use environment variables (with defaults)
 # Note: $1, $2, etc. now refer to remaining args after URL/password were shifted off
 GOVC_USERNAME=${1:-${GOVC_USERNAME:-'root'}}
 GOVC_DATASTORE=${2:-${GOVC_DATASTORE:-'datastore1'}}
-GOVC_VM_NAME=${3:-${GOVC_VM_NAME:-'foundry-appliance'}}
+GOVC_VM_NAME_BASE=${3:-${GOVC_VM_NAME:-'foundry-appliance'}}
 GOVC_RESOURCE_POOL=${4:-${GOVC_RESOURCE_POOL:-'Resources'}}
 
-# Set OVA_URL after temp directory is available
+# Export credentials for validation
+export GOVC_URL
+export GOVC_USERNAME
+export GOVC_PASSWORD
+export GOVC_INSECURE=1
+
+echo ""
+echo "Validating ESXi credentials..."
+echo "Connecting to vSphere at $GOVC_URL as $GOVC_USERNAME..."
+
+# Test connection before downloading OVA
+if ! "$GOVC_PATH" about >/dev/null 2>&1; then
+    echo "Error: Failed to connect to ESXi host"
+    echo "Please verify:"
+    echo "  - GOVC_URL is correct and reachable"
+    echo "  - GOVC_USERNAME and GOVC_PASSWORD are valid"
+    echo "  - ESXi host is accessible on the network"
+    exit 1
+fi
+
+echo "✓ Successfully connected to ESXi host"
+
+# Set OVA_URL after credentials are validated
 if [ -n "$5" ]; then
     OVA_URL="$5"
 elif [ -n "$OVA_URL" ]; then
@@ -286,16 +342,49 @@ else
     OVA_URL=$(get_latest_release_url)
 fi
 
-echo "Downloading foundry.ova from: $OVA_URL"
-echo "This may take several minutes depending on your connection..."
-download_file "$OVA_URL" "foundry.ova"
-
-if [ ! -f foundry.ova ]; then
-    echo "Error: Failed to download foundry.ova"
-    exit 1
+# Extract version from OVA URL for VM naming
+OVA_FILENAME=$(basename "$OVA_URL")
+if echo "$OVA_FILENAME" | grep -q "v[0-9]"; then
+    VERSION=$(echo "$OVA_FILENAME" | grep -o "v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" | head -1)
+    GOVC_VM_NAME="${GOVC_VM_NAME_BASE}-${VERSION}"
+else
+    GOVC_VM_NAME="$GOVC_VM_NAME_BASE"
 fi
 
-echo "Download completed. File size: $(ls -lh foundry.ova | awk '{print $5}')"
+echo "VM will be named: $GOVC_VM_NAME"
+
+# Check if OVA already exists and is from the same URL
+if [ -f "$OVA_FILENAME" ] && [ -f "${OVA_FILENAME}.url" ]; then
+    CACHED_URL=$(cat "${OVA_FILENAME}.url" 2>/dev/null || echo "")
+    if [ "$CACHED_URL" = "$OVA_URL" ]; then
+        echo "Using cached OVA: $OVA_FILENAME"
+        echo "File size: $(ls -lh "$OVA_FILENAME" | awk '{print $5}')"
+        cp "$OVA_FILENAME" foundry.ova
+    else
+        echo "OVA URL changed, downloading new version..."
+        echo "Downloading foundry.ova from: $OVA_URL"
+        echo "This may take several minutes depending on your connection..."
+        download_file "$OVA_URL" "foundry.ova"
+        # Cache the downloaded file and URL
+        cp foundry.ova "$OVA_FILENAME"
+        echo "$OVA_URL" > "${OVA_FILENAME}.url"
+        echo "Download completed. File size: $(ls -lh foundry.ova | awk '{print $5}')"
+    fi
+else
+    echo "Downloading foundry.ova from: $OVA_URL"
+    echo "This may take several minutes depending on your connection..."
+    download_file "$OVA_URL" "foundry.ova"
+    
+    if [ ! -f foundry.ova ]; then
+        echo "Error: Failed to download foundry.ova"
+        exit 1
+    fi
+    
+    # Cache the downloaded file and URL
+    cp foundry.ova "$OVA_FILENAME"
+    echo "$OVA_URL" > "${OVA_FILENAME}.url"
+    echo "Download completed. File size: $(ls -lh foundry.ova | awk '{print $5}')"
+fi
 
 echo "Extracting OVA..."
 mkdir foundry-ova
@@ -424,15 +513,8 @@ echo "OVA processing completed successfully"
 
 # 3) Import the edited OVF with govc
 
-# Export for govc
-export GOVC_URL
-export GOVC_USERNAME
-export GOVC_PASSWORD
-export GOVC_INSECURE=1
-
 echo ""
 echo "Starting VM import..."
-echo "Connecting to vSphere at $GOVC_URL as $GOVC_USERNAME..."
 
 echo "Importing OVF..."
 "$GOVC_PATH" import.ovf \
