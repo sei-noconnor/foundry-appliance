@@ -25,8 +25,9 @@ To deploy the appliance to a standalone ESXi host, you can use the included `imp
 
 **Quick deployment via curl:**
 This can be run from any Linux or macOS host with network access to your ESXi server:
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/cmu-sei/foundry-appliance/HEAD/import-appliance.sh | \
+curl -sSL https://github.com/sei-noconnor/foundry-appliance/HEAD/import-appliance/import-appliance.sh | \
   GOVC_URL=your-esxi-host.com \
   GOVC_USERNAME=root \
   GOVC_PASSWORD='your-password' \
