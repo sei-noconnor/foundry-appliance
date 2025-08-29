@@ -1,90 +1,105 @@
 #!/bin/bash
 
-# Universal Foundry Appliance Import Script
-# Works on: macOS, Linux, ESXi hosts, and via curl piping
+# Foundry Appliance Import Script
+# Works on: macOS and Linux hosts
+# Note: ESXi hosts are not supported due to wget lacking HTTPS support
 #
 # Usage options:
-# 1) Local with env vars: export GOVC_URL=<server> GOVC_PASSWORD=<password> && ./import-appliance.sh [username] [datastore] [vm_name] [resource_pool]
-# 2) Local with args: ./import-appliance.sh <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]
-# 3) Via curl (non-ESXi): curl -sSL <script-url> | bash -s -- <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]
-# 4) On ESXi via wget: wget -qO- <script-url> | sh -s -- <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]
+# 1) Local: export GOVC_URL=<server> GOVC_PASSWORD=<password> GOVC_DATASTORE=<datastore> && ./import-appliance.sh
+# 2) Via curl: curl -sSL <script-url> | GOVC_URL=<server> GOVC_PASSWORD=<password> GOVC_DATASTORE=<datastore> bash
 
 set -e  # Exit on any error
 
-# Detect environment
-detect_environment() {
-    # Check if we're on ESXi
-    if [ -f /etc/vmware-release ] && grep -q "ESXi" /etc/vmware-release 2>/dev/null; then
-        echo "esxi"
-    elif [ -f /etc/vmware-release ]; then
-        echo "vmware"  
-    elif command -v uname >/dev/null 2>&1; then
-        case "$(uname -s)" in
-            Darwin) echo "macos" ;;
-            Linux) echo "linux" ;;
-            *) echo "unknown" ;;
-        esac
-    else
-        echo "unknown"
-    fi
-}
-
-PLATFORM=$(detect_environment)
-echo "Detected platform: $PLATFORM"
-
-# Use sh for ESXi compatibility, bash for others
-if [ "$PLATFORM" = "esxi" ]; then
-    # Ensure we're using sh syntax
-    set +h  # Disable hash table for commands
+# Check for ESXi and exit with error
+if [ -f /etc/vmware-release ] && grep -q "ESXi" /etc/vmware-release 2>/dev/null; then
+    echo "Error: ESXi hosts are not supported"
+    echo "ESXi's built-in wget does not support HTTPS, which is required for downloading"
+    echo "Please run this script from a Linux or macOS host with network access to your ESXi server"
+    exit 1
 fi
 
-# Check if credentials are provided as arguments (for curl usage) or environment variables
-if [[ $# -ge 2 ]]; then
-    # Arguments provided - assume curl usage format
-    GOVC_URL="$1"
-    GOVC_PASSWORD="$2"
-    shift 2  # Remove first two arguments
-else
-    # No arguments - check environment variables
-    if [[ -z "$GOVC_URL" || -z "$GOVC_PASSWORD" ]]; then
+# Function to get latest release URL from GitHub API
+get_latest_release_url() {
+    local tool=$(detect_download_tool)
+    local api_url="https://api.github.com/repos/cmu-sei/foundry-appliance/releases/latest"
+    local temp_response="${TEMP_DIR}/github_response.json"
+    local fallback_url="https://incuspub.blob.core.usgovcloudapi.net/ova/appliance/foundry-appliance-v0.10.2.ova"
+    
+    case "$tool" in
+        curl)
+            if curl -s "$api_url" > "$temp_response" 2>/dev/null && [ -s "$temp_response" ]; then
+                # File exists and is not empty
+                :
+            else
+                echo "$fallback_url"
+                return
+            fi
+            ;;
+        wget)
+            if wget -q -O "$temp_response" "$api_url" 2>/dev/null && [ -s "$temp_response" ]; then
+                # File exists and is not empty
+                :
+            else
+                echo "$fallback_url"
+                return
+            fi
+            ;;
+        *)
+            echo "$fallback_url"
+            return
+            ;;
+    esac
+    
+    # Extract OVA URL from JSON response
+    if [ -f "$temp_response" ] && grep -q "browser_download_url" "$temp_response" 2>/dev/null; then
+        # Try to extract the .ova URL
+        if command_exists grep && command_exists sed; then
+            ova_url=$(grep "browser_download_url.*\.ova" "$temp_response" 2>/dev/null | head -1 | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/' 2>/dev/null)
+            if [ -n "$ova_url" ] && [ "$ova_url" != "$temp_response" ]; then
+                rm -f "$temp_response" 2>/dev/null
+                echo "$ova_url"
+                return
+            fi
+        fi
+    fi
+    
+    # Fallback to hardcoded URL if API parsing fails
+    rm -f "$temp_response" 2>/dev/null
+    echo "$fallback_url"
+}
+
+# Check for required environment variables
+if [[ -z "$GOVC_URL" || -z "$GOVC_PASSWORD" ]]; then
         echo "Error: Missing required credentials"
         echo ""
         echo "For curl usage:"
-        echo "  curl -sSL <script-url> | bash -s -- <GOVC_URL> <GOVC_PASSWORD> [username] [datastore] [vm_name] [resource_pool]"
-        echo ""
-        echo "Example:"
-        echo "  curl -sSL https://raw.githubusercontent.com/sei-noconnor/foundry-appliance/main/import-appliance.sh | bash -s -- esx-01.example.com 'password123'"
+        echo "  curl -sSL <script-url> | GOVC_URL=<host> GOVC_USERNAME=root GOVC_PASSWORD='<pass>' GOVC_DATASTORE=<datastore> bash"
         echo ""
         echo "For local execution:"
         echo "  export GOVC_URL=<ESXi-server-or-vcenter>"
+        echo "  export GOVC_USERNAME=root"
         echo "  export GOVC_PASSWORD='<password>'"
-        echo "  ./import-appliance.sh [username] [datastore] [vm_name] [resource_pool]"
-        echo ""
-        echo "Optional parameters:"
-        echo "  GOVC_USERNAME (default: 'root')"
-        echo "  GOVC_DATASTORE (default: 'ds_nfs')"
-        echo "  GOVC_VM_NAME (default: 'foundry-appliance')"
-        echo "  GOVC_RESOURCE_POOL (default: 'Resources')"
+        echo "  export GOVC_DATASTORE=<datastore>"
+        echo "  ./import-appliance.sh"
         exit 1
-    fi
 fi
 
-# Create temporary working directory (platform-aware)
-if [ "$PLATFORM" = "esxi" ]; then
-    # ESXi has limited space, use /tmp with process ID
-    TEMP_DIR="/tmp/foundry-import-$$"
-    mkdir -p "$TEMP_DIR"
+# Create or reuse working directory (avoid tmpfs space limits)
+if [ -d "$HOME" ] && [ -w "$HOME" ]; then
+    TEMP_DIR="$HOME/.foundry-appliance-import"
 else
-    # Use mktemp for other platforms
-    TEMP_DIR=$(mktemp -d)
+    TEMP_DIR="/var/tmp/foundry-appliance-import"
 fi
+mkdir -p "$TEMP_DIR"
 
 echo "Working in temporary directory: $TEMP_DIR"
 
 # Cleanup function
 cleanup() {
     echo "Cleaning up temporary files..."
-    rm -rf "$TEMP_DIR"
+    # Only clean extracted files, keep downloaded OVA for reuse
+    rm -rf "$TEMP_DIR"/foundry-ova 2>/dev/null || true
+    rm -f "$TEMP_DIR"/github_response.json 2>/dev/null || true
 }
 
 # Set trap to cleanup on exit
@@ -128,13 +143,11 @@ download_file() {
 
 # Function to detect OS
 detect_os() {
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        echo "macos"
-    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        echo "linux"
-    else
-        echo "unsupported"
-    fi
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux) echo "linux" ;;
+        *) echo "unsupported" ;;
+    esac
 }
 
 # Function to install xmllint
@@ -166,33 +179,98 @@ install_xmllint() {
     fi
 }
 
+# Function to get latest govc version from GitHub
+get_latest_govc_version() {
+    local tool=$(detect_download_tool)
+    local api_url="https://api.github.com/repos/vmware/govmomi/releases/latest"
+    
+    echo "Fetching latest govc version from GitHub API..." >&2
+    
+    case "$tool" in
+        curl)
+            # Get the tag_name from the latest release API
+            local version=$(curl -s "$api_url" 2>/dev/null | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' 2>/dev/null)
+            echo "API returned version: $version" >&2
+            echo "$version"
+            ;;
+        wget)
+            # Fallback: try to get version from redirect
+            local version=$(wget -qO- "$api_url" 2>/dev/null | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' 2>/dev/null)
+            echo "API returned version: $version" >&2
+            echo "$version"
+            ;;
+        *)
+            echo "No download tool available, using fallback version" >&2
+            echo "v0.52.0"  # fallback version
+            ;;
+    esac
+}
+
 # Function to download and install govc
 install_govc() {
     local os=$(detect_os)
     echo "Installing govc..."
     
-    if [ "$PLATFORM" = "esxi" ]; then
-        # For ESXi, install to temp directory (no sudo available)
-        echo "Installing govc to temporary directory for ESXi..."
-        cd "$TEMP_DIR"
-        download_file "https://github.com/vmware/govmomi/releases/latest/download/govc_linux_amd64.gz" "govc.gz"
-        gunzip govc.gz
+    if [ "$os" = "macos" ]; then
+        # Check for Homebrew first
+        if command_exists brew; then
+            echo "Using Homebrew to install govc..."
+            brew install govc
+            GOVC_PATH="govc"
+            return
+        fi
+        
+        # Manual installation for macOS
+        echo "Homebrew not found, installing from GitHub releases..."
+        local arch=$(uname -m)
+        case "$arch" in
+            x86_64) arch="x86_64" ;;
+            arm64) arch="arm64" ;;
+            *) 
+                echo "Unsupported macOS architecture: $arch"
+                exit 1
+                ;;
+        esac
+        
+        local version=$(get_latest_govc_version)
+        if [ -z "$version" ]; then
+            version="v0.52.0"  # fallback
+        fi
+        echo "Installing govc version: $version"
+        
+        local download_url="https://github.com/vmware/govmomi/releases/download/${version}/govc_Darwin_${arch}.tar.gz"
+        echo "Downloading from: $download_url"
+        download_file "$download_url" "govc_Darwin_${arch}.tar.gz"
+        tar -xzf "govc_Darwin_${arch}.tar.gz"
         chmod +x govc
-        GOVC_PATH="$TEMP_DIR/govc"
-        echo "govc installed to $GOVC_PATH"
-        cd - > /dev/null
-    elif [ "$os" = "macos" ]; then
-        download_file "https://github.com/vmware/govmomi/releases/latest/download/govc_darwin_amd64.gz" "govc_darwin_amd64.gz"
-        gunzip govc_darwin_amd64.gz
-        chmod +x govc_darwin_amd64
-        sudo mv govc_darwin_amd64 /usr/local/bin/govc
+        sudo mv govc /usr/local/bin/govc
         GOVC_PATH="govc"
+        
     elif [ "$os" = "linux" ]; then
-        download_file "https://github.com/vmware/govmomi/releases/latest/download/govc_linux_amd64.gz" "govc_linux_amd64.gz"
-        gunzip govc_linux_amd64.gz
-        chmod +x govc_linux_amd64
-        sudo mv govc_linux_amd64 /usr/local/bin/govc
+        local arch=$(uname -m)
+        case "$arch" in
+            x86_64) arch="x86_64" ;;
+            aarch64|arm64) arch="arm64" ;;
+            *) 
+                echo "Unsupported Linux architecture: $arch"
+                exit 1
+                ;;
+        esac
+        
+        local version=$(get_latest_govc_version)
+        if [ -z "$version" ]; then
+            version="v0.52.0"  # fallback
+        fi
+        echo "Installing govc version: $version"
+        
+        local download_url="https://github.com/vmware/govmomi/releases/download/${version}/govc_Linux_${arch}.tar.gz"
+        echo "Downloading from: $download_url"
+        download_file "$download_url" "govc_Linux_${arch}.tar.gz"
+        tar -xzf "govc_Linux_${arch}.tar.gz"
+        chmod +x govc
+        sudo mv govc /usr/local/bin/govc
         GOVC_PATH="govc"
+        
     else
         echo "Unsupported OS for govc installation"
         exit 1
@@ -205,18 +283,10 @@ echo "Checking for required applications..."
 # Initialize GOVC_PATH
 GOVC_PATH="govc"
 
-# Platform-specific requirements
-if [ "$PLATFORM" = "esxi" ]; then
-    echo "ESXi platform detected - checking for basic tools..."
-    if ! command_exists tar; then
-        echo "Error: tar not found. This script requires tar for OVA extraction."
-        exit 1
-    fi
-    if [ "$(detect_download_tool)" = "none" ]; then
-        echo "Error: Neither curl nor wget found for downloading files."
-        exit 1
-    fi
-    echo "Basic tools found: tar, $(detect_download_tool)"
+# Check for xmllint
+if ! command_exists xmllint; then
+    echo "xmllint not found, installing..."
+    install_xmllint
 else
     # For non-ESXi platforms, check for xmllint
     if ! command_exists xmllint; then
@@ -242,16 +312,83 @@ echo ""
 # 1) Download and extract the OVA
 cd "$TEMP_DIR"
 
-echo "Downloading foundry.ova..."
-echo "This may take several minutes depending on your connection..."
-download_file "https://incuspub.blob.core.usgovcloudapi.net/ova/appliance/foundry-appliance-v0.10.2.ova" "foundry.ova"
+# Set defaults from environment variables
+GOVC_USERNAME=${GOVC_USERNAME:-'root'}
+GOVC_DATASTORE=${GOVC_DATASTORE:-'datastore1'}
+GOVC_VM_NAME_BASE=${GOVC_VM_NAME:-'foundry-appliance'}
+GOVC_RESOURCE_POOL=${GOVC_RESOURCE_POOL:-'Resources'}
 
-if [ ! -f foundry.ova ]; then
-    echo "Error: Failed to download foundry.ova"
+# Export credentials for validation
+export GOVC_URL
+export GOVC_USERNAME
+export GOVC_PASSWORD
+export GOVC_INSECURE=1
+
+echo ""
+echo "Validating ESXi credentials..."
+echo "Connecting to vSphere at $GOVC_URL as $GOVC_USERNAME..."
+
+# Test connection before downloading OVA
+if ! "$GOVC_PATH" about >/dev/null 2>&1; then
+    echo "Error: Failed to connect to ESXi host"
+    echo "Please verify:"
+    echo "  - GOVC_URL is correct and reachable"
+    echo "  - GOVC_USERNAME and GOVC_PASSWORD are valid"
+    echo "  - ESXi host is accessible on the network"
     exit 1
 fi
 
-echo "Download completed. File size: $(ls -lh foundry.ova | awk '{print $5}')"
+echo "✓ Successfully connected to ESXi host"
+
+# Set OVA_URL after credentials are validated
+if [ -z "$OVA_URL" ]; then
+    # Get latest release URL if not provided
+    OVA_URL=$(get_latest_release_url)
+fi
+
+# Extract version from OVA URL for VM naming
+OVA_FILENAME=$(basename "$OVA_URL")
+if echo "$OVA_FILENAME" | grep -q "v[0-9]"; then
+    VERSION=$(echo "$OVA_FILENAME" | grep -o "v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" | head -1)
+    GOVC_VM_NAME="${GOVC_VM_NAME_BASE}-${VERSION}"
+else
+    GOVC_VM_NAME="$GOVC_VM_NAME_BASE"
+fi
+
+echo "VM will be named: $GOVC_VM_NAME"
+
+# Check if OVA already exists and is from the same URL
+if [ -f "$OVA_FILENAME" ] && [ -f "${OVA_FILENAME}.url" ]; then
+    CACHED_URL=$(cat "${OVA_FILENAME}.url" 2>/dev/null || echo "")
+    if [ "$CACHED_URL" = "$OVA_URL" ]; then
+        echo "Using cached OVA: $OVA_FILENAME"
+        echo "File size: $(ls -lh "$OVA_FILENAME" | awk '{print $5}')"
+        cp "$OVA_FILENAME" foundry.ova
+    else
+        echo "OVA URL changed, downloading new version..."
+        echo "Downloading foundry.ova from: $OVA_URL"
+        echo "This may take several minutes depending on your connection..."
+        download_file "$OVA_URL" "foundry.ova"
+        # Cache the downloaded file and URL
+        cp foundry.ova "$OVA_FILENAME"
+        echo "$OVA_URL" > "${OVA_FILENAME}.url"
+        echo "Download completed. File size: $(ls -lh foundry.ova | awk '{print $5}')"
+    fi
+else
+    echo "Downloading foundry.ova from: $OVA_URL"
+    echo "This may take several minutes depending on your connection..."
+    download_file "$OVA_URL" "foundry.ova"
+    
+    if [ ! -f foundry.ova ]; then
+        echo "Error: Failed to download foundry.ova"
+        exit 1
+    fi
+    
+    # Cache the downloaded file and URL
+    cp foundry.ova "$OVA_FILENAME"
+    echo "$OVA_URL" > "${OVA_FILENAME}.url"
+    echo "Download completed. File size: $(ls -lh foundry.ova | awk '{print $5}')"
+fi
 
 echo "Extracting OVA..."
 mkdir foundry-ova
@@ -283,8 +420,8 @@ fi
 
 echo "Processing $OVF_FILE to remove sound card..."
 
-if [ "$PLATFORM" = "esxi" ] || ! command_exists python3; then
-    # Use sed-based approach for ESXi or systems without Python
+if ! command_exists python3; then
+    # Use sed-based approach for systems without Python
     echo "Using simplified sound card removal (sed-based)..."
     
     # Create a backup
@@ -379,22 +516,9 @@ echo ""
 echo "OVA processing completed successfully"
 
 # 3) Import the edited OVF with govc
-# Parse remaining command line arguments or use environment variables (with defaults)
-# Note: $1, $2, etc. now refer to remaining args after URL/password were shifted off
-GOVC_USERNAME=${1:-${GOVC_USERNAME:-'root'}}
-GOVC_DATASTORE=${2:-${GOVC_DATASTORE:-'ds_nfs'}}
-GOVC_VM_NAME=${3:-${GOVC_VM_NAME:-'foundry-appliance'}}
-GOVC_RESOURCE_POOL=${4:-${GOVC_RESOURCE_POOL:-'Resources'}}
-
-# Export for govc
-export GOVC_URL
-export GOVC_USERNAME
-export GOVC_PASSWORD
-export GOVC_INSECURE=1
 
 echo ""
 echo "Starting VM import..."
-echo "Connecting to vSphere at $GOVC_URL as $GOVC_USERNAME..."
 
 echo "Importing OVF..."
 "$GOVC_PATH" import.ovf \

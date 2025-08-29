@@ -10,12 +10,55 @@ This project builds the virtual appliance using Ubuntu and [K3s](https://k3s.io/
 
 ## Getting Started
 
-After deploying the appliance, visit https://foundry.local to begin using the apps. Or login using the VM console:
+After [deploying the appliance](#deploying-the-appliance), visit https://foundry.local to begin using the apps. Or login using the VM console:
 
 ```
 username: foundry  
 password: foundry
 ```
+
+## Deploying the Appliance
+
+### ESXi Host
+
+To deploy the appliance to a standalone ESXi host, you can use the included `import-appliance.sh` script with [govc](https://github.com/vmware/govmomi/tree/main/govc):
+
+**Quick deployment via curl:**
+This can be run from any Linux or macOS host with network access to your ESXi server:
+
+```bash
+curl -sSL https://github.com/sei-noconnor/foundry-appliance/HEAD/import-appliance/import-appliance.sh | \
+  GOVC_URL=your-esxi-host.com \
+  GOVC_USERNAME=root \
+  GOVC_PASSWORD='your-password' \
+  GOVC_DATASTORE=datastore1 \
+  bash
+```
+
+**Local deployment:**
+```bash
+# Set ESXi connection details
+export GOVC_URL=https://your-esxi-host.com
+export GOVC_USERNAME=root
+export GOVC_PASSWORD=your-password
+export GOVC_INSECURE=true
+export GOVC_DATASTORE=datastore1
+
+# Deploy the OVA (automatically downloads latest release)
+./import-appliance.sh
+```
+
+The script will:
+- Automatically download the latest release OVA
+- Deploy the OVA to your ESXi host
+- Configure the VM with appropriate settings
+- Power on the VM automatically
+
+**Prerequisites:**
+- [govc](https://github.com/vmware/govmomi/tree/main/govc) must be installed
+- Network connectivity to your ESXi host
+- DHCP and internet access
+- Valid ESXi credentials with administrative privileges
 
 ## Apps
 
