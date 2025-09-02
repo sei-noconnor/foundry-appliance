@@ -2,5 +2,6 @@
 .vscode/
 packer_cache/
 output-*/
+output/
 *.pkrvars.hcl
 .claude/

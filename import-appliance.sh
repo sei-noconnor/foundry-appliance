@@ -1,14 +1,26 @@
 #!/bin/bash
 
-# Foundry Appliance Import Script
-# Works on: macOS and Linux hosts
-# Note: ESXi hosts are not supported due to wget lacking HTTPS support
+# Foundry Appliance Import Script (Modular Version)
+# This script combines download-ova.sh and import-ova.sh for convenience
 #
 # Usage options:
 # 1) Local: export GOVC_URL=<server> GOVC_PASSWORD=<password> GOVC_DATASTORE=<datastore> && ./import-appliance.sh
 # 2) Via curl: curl -sSL <script-url> | GOVC_URL=<server> GOVC_PASSWORD=<password> GOVC_DATASTORE=<datastore> bash
+# 3) Modular: Use download-ova.sh and import-ova.sh separately for better control
 
 set -e  # Exit on any error
+
+# Script directory for finding modular components
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Check if modular scripts exist
+if [ -f "$SCRIPT_DIR/download-ova.sh" ] && [ -f "$SCRIPT_DIR/import-ova.sh" ]; then
+    USE_MODULAR=true
+    echo "Using modular approach with download-ova.sh and import-ova.sh"
+else
+    USE_MODULAR=false
+    echo "Using legacy monolithic approach"
+fi
 
 # Check for ESXi and exit with error
 if [ -f /etc/vmware-release ] && grep -q "ESXi" /etc/vmware-release 2>/dev/null; then
@@ -68,21 +80,71 @@ get_latest_release_url() {
     echo "$fallback_url"
 }
 
-# Check for required environment variables
+# Check for required environment variables and use modular approach if available
 if [[ -z "$GOVC_URL" || -z "$GOVC_PASSWORD" ]]; then
-        echo "Error: Missing required credentials"
-        echo ""
-        echo "For curl usage:"
-        echo "  curl -sSL <script-url> | GOVC_URL=<host> GOVC_USERNAME=root GOVC_PASSWORD='<pass>' GOVC_DATASTORE=<datastore> bash"
-        echo ""
-        echo "For local execution:"
-        echo "  export GOVC_URL=<ESXi-server-or-vcenter>"
-        echo "  export GOVC_USERNAME=root"
-        echo "  export GOVC_PASSWORD='<password>'"
-        echo "  export GOVC_DATASTORE=<datastore>"
-        echo "  ./import-appliance.sh"
-        exit 1
+    echo "Error: Missing required credentials"
+    echo ""
+    echo "Usage options:"
+    echo "1) Modular approach (recommended):"
+    echo "   ./download-ova.sh                    # Download and process OVA"
+    echo "   export GOVC_URL=<host> GOVC_PASSWORD=<pass> GOVC_DATASTORE=<datastore>"
+    echo "   ./import-ova.sh output/foundry-appliance-*.ova"
+    echo ""
+    echo "2) Legacy monolithic approach:"
+    echo "   export GOVC_URL=<ESXi-server-or-vcenter>"
+    echo "   export GOVC_USERNAME=root"
+    echo "   export GOVC_PASSWORD='<password>'"
+    echo "   export GOVC_DATASTORE=<datastore>"
+    echo "   ./import-appliance.sh"
+    exit 1
 fi
+
+# Use modular approach if scripts are available
+if [ "$USE_MODULAR" = true ]; then
+    echo ""
+    echo "Using modular approach for better reliability..."
+    
+    # Step 1: Download and process OVA
+    echo "Step 1: Downloading and processing OVA..."
+    if "$SCRIPT_DIR/download-ova.sh"; then
+        echo "✓ OVA download and processing completed"
+    else
+        echo "Error: Failed to download and process OVA"
+        exit 1
+    fi
+    
+    # Step 2: Find the processed OVA
+    OVA_FILE=""
+    if [ -d "output" ]; then
+        for file in output/foundry-appliance-*.ova; do
+            if [ -f "$file" ]; then
+                OVA_FILE="$file"
+                break
+            fi
+        done
+    fi
+    
+    if [ -z "$OVA_FILE" ]; then
+        echo "Error: No processed OVA found in output directory"
+        exit 1
+    fi
+    
+    echo "Found processed OVA: $OVA_FILE"
+    
+    # Step 3: Import the OVA
+    echo "Step 2: Importing OVA to ESXi..."
+    if "$SCRIPT_DIR/import-ova.sh" "$OVA_FILE"; then
+        echo "✓ Import completed successfully using modular approach"
+        exit 0
+    else
+        echo "Error: Failed to import OVA"
+        exit 1
+    fi
+fi
+
+# Fall back to legacy monolithic approach
+echo ""
+echo "Using legacy monolithic approach..."
 
 # Create or reuse working directory (avoid tmpfs space limits)
 if [ -d "$HOME" ] && [ -w "$HOME" ]; then
